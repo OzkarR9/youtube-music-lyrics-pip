@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <h1>YT Music 歌詞子母畫面</h1>
+
+    <section id="status">
+      <div class="row"><span class="label">狀態</span><span id="pip-state">…</span></div>
+      <div class="row"><span class="label">歌曲</span><span id="song">—</span></div>
+      <div class="row"><span class="label">歌詞來源</span><span id="source">—</span></div>
+      <div class="row"><span class="label">錯誤</span><span id="error">—</span></div>
+      <div class="row"><span class="label">頁面腳本</span><span id="injected">…</span></div>
+      <div class="row"><span class="label">Chrome</span><span id="chrome-version">…</span></div>
+    </section>
+
+    <div id="actions">
+      <button id="toggle">開啟子母畫面</button>
+      <button id="reload" title="重新整理 YouTube Music 分頁以載入頁面腳本">重新整理分頁</button>
+    </div>
+
+    <div id="fontrow">
+      <span class="label">字型大小</span>
+      <button id="font-minus" aria-label="縮小字型">A−</button>
+      <span id="font-size">28</span>
+      <button id="font-plus" aria-label="放大字型">A+</button>
+    </div>
+
+    <p id="hint">提示：最可靠的方式是點擊播放器旁的「PiP 歌詞」按鈕，或在頁面按 Alt+L。工具列按鈕因瀏覽器啟動權限制，有時需頁面操作才能開啟。</p>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

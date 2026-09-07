@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Music 歌詞子母畫面",
+  "version": "1.0.0",
+  "description": "在 YouTube Music 播放歌曲時，把逐字同步（KTV 式）歌詞投影到子母畫面視窗。",
+  "permissions": ["scripting", "storage"],
+  "host_permissions": ["*://music.youtube.com/*", "https://lrclib.net/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "YouTube Music 歌詞子母畫面"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://music.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://music.youtube.com/*"],
+      "js": ["pip-opener.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ],
+  "commands": {
+    "toggle-pip": {
+      "suggested_key": {
+        "default": "Alt+Shift+L"
+      },
+      "description": "切換歌詞子母畫面（開啟需在頁面內操作以取得使用者啟動權，建議用頁面 Alt+L）"
+    }
+  }
+}
