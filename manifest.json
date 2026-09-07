@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "YouTube Music 歌詞子母畫面",
   "version": "1.0.0",
-  "description": "在 YouTube Music 播放歌曲時，把逐字同步（KTV 式）歌詞投影到子母畫面視窗。",
+  "description": "在 YouTube Music 播放歌曲時，把逐行同步歌詞投影到子母畫面視窗。",
   "permissions": ["scripting", "storage"],
   "host_permissions": ["*://music.youtube.com/*", "https://lrclib.net/*"],
   "background": {

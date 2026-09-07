@@ -1,10 +1,10 @@
 # YouTube Music 歌詞子母畫面（Chrome Extension）
 
-在 YouTube Music 播放歌曲時，把「正在播放」的歌詞以 **逐字同步（KTV 式）** 方式投影到
+在 YouTube Music 播放歌曲時，把「正在播放」的歌詞以 **逐行同步** 方式投影到
 **Document Picture-in-Picture（子母畫面）** 視窗。
 
-- 歌詞來源：**混合策略** —— 優先以 LRCLIB 外部 API 取得同步時間軸（逐字 / 逐行）；
-  LRCLIB 無結果時，改用 YouTube Music 介面文字作為靜態捲動降級。
+- 歌詞來源：**混合策略** —— 優先使用 YouTube Music 官方逐行時間軸（對應該支影片）；
+  沒有官方歌詞時才用 LRCLIB（需歌名+歌手，並比對時長）；再不行才用介面文字降級。
 - 觸發方式：**頁內「PiP 歌詞」按鈕**、**頁面快捷鍵 `Alt+L`**、以及工具列 popup 控制器。
 - 僅支援桌面版 **Chrome 116+**（Document Picture-in-Picture API）。
 
@@ -32,9 +32,9 @@
 
 ```
 content.js (ISOLATED)      pip-opener.js (MAIN)        background.js
-      │ 抓曲目/歌詞              │  requestWindow()          │  LRCLIB 查詢
+      │ 抓曲目／官方歌詞          │  requestWindow()          │  LRCLIB 後備
       │ 進度輪詢                 │  直接寫入子母畫面 UI      │  LRC 解析
-      └── window.postMessage ────┘  與 KTV 渲染             │
+      └── window.postMessage ────┘  與逐行渲染             │
       └──────────── chrome.runtime 訊息 ────────────────────┘
 ```
 
@@ -44,17 +44,16 @@ content.js (ISOLATED)      pip-opener.js (MAIN)        background.js
   因為 Document PiP 必須由使用者啟動權觸發，而擴充功能工具列 / manifest 快捷鍵不會把
   啟動權傳遞到頁面，所以真正的開啟動作放在頁面 context，由按鈕 click 與 `Alt+L` 直接觸發。
 - **子母畫面視窗不導航到擴充功能頁面**（避免跨來源導航導致視窗被關閉），而是由
-  `pip-opener.js` 直接把 UI 寫進同源的子母畫面視窗，並依 content 傳來的進度做逐行＋逐字高亮。
+  `pip-opener.js` 直接把 UI 寫進同源的子母畫面視窗，並依 content 傳來的進度做逐行高亮與置中。
 - `background.js` 負責 LRCLIB 查詢與 LRC 解析。
 
 ## 重要假設與限制
 
-- **逐字時間軸以 LRCLIB 為主要來源**。LRCLIB 提供的是逐行同步（line-synced）LRC；
-  若歌詞本身含 enhanced LRC 逐字時間戳則使用真實逐字，否則以估算逐字呈現。
-  YouTube Music 介面僅供「歌詞文字」與無時間軸時的降級顯示（其同步時間軸存在於
-  應用程式 JS 狀態，DOM 不直接暴露，無法穩定抓取）。
+- **時間軸優先使用 YouTube Music InnerTube 官方 timed lyrics**（與該 videoId 對時）。
+  沒有官方歌詞時才用 LRCLIB；不再做 KTV 逐字高亮，只高亮目前行並垂直置中。
 - 專輯資訊在 YouTube Music 播放列中不直接顯示，`album` 為 best-effort（通常為空）。
 - 子母畫面視窗頂部的「來源網域（music.youtube.com）」由瀏覽器顯示，無法由頁面程式碼移除。
+- 子母畫面視窗本身為不透明視窗；目前 Chrome 標準 Document PiP API 不支援「視窗級透明」（透出後方桌面/視窗）。頁面背景已改為半透明深色漸層，`transparent` 參數僅為漸進增強，穩定版 Chrome 會忽略它。
 - 僅支援桌面版 Chrome 116+。
 
 ## 驗證清單

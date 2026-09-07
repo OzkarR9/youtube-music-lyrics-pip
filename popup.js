@@ -7,7 +7,7 @@
 
   const SOURCE_LABEL = {
     'lrclib': 'LRCLIB',
-    'youtube-music': 'YouTube Music（靜態）',
+    'youtube-music': 'YouTube Music',
     'none': '無'
   };
 

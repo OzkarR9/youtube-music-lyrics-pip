@@ -53,13 +53,15 @@ async function fetchLyricsFromLrclib(meta) {
 
   const timeout = { signal: AbortSignal.timeout(8000) };
 
-  // 多層次查詢：duration/album/artist 常因 YT Music 的影片時長或呈現方式而比對失敗，
-  // 逐步放寬條件，確保能命中結果。
+  // 不要只靠歌名亂配（同名曲會拿到錯誤時間軸，切歌後看起來不像從第一句開始）。
   const tiers = [];
-  if (duration > 0) tiers.push({ track_name: title, artist_name: artist, album_name: album, duration: String(duration) });
-  tiers.push({ track_name: title, artist_name: artist, album_name: album });
-  tiers.push({ track_name: title, artist_name: artist });
-  tiers.push({ track_name: title });
+  if (duration > 0 && artist) {
+    tiers.push({ track_name: title, artist_name: artist, album_name: album, duration: String(duration) });
+  }
+  if (artist) {
+    tiers.push({ track_name: title, artist_name: artist, album_name: album });
+    tiers.push({ track_name: title, artist_name: artist });
+  }
 
   let lastReason = 'no-match';
 
@@ -85,7 +87,7 @@ async function fetchLyricsFromLrclib(meta) {
       continue;
     }
 
-    const best = results.find((r) => r && r.syncedLyrics) || results[0];
+    const best = pickLrclibResult(results, duration);
     if (best && best.syncedLyrics) {
       const lines = parseLrc(best.syncedLyrics);
       if (lines.length) {
@@ -105,29 +107,26 @@ async function fetchLyricsFromLrclib(meta) {
     lastReason = 'no-synced';
   }
 
-  // 最後手段：直接以曲名呼叫 /api/get
-  try {
-    const gparams = new URLSearchParams({ track_name: title });
-    const res = await fetch(`https://lrclib.net/api/get?${gparams.toString()}`, timeout);
-    if (res.ok) {
-      const rec = await res.json();
-      if (rec && rec.syncedLyrics) {
-        const lines = parseLrc(rec.syncedLyrics);
-        if (lines.length) {
-          return { ok: true, lines, source: 'lrclib', matched: { trackName: rec.trackName, artistName: rec.artistName, albumName: rec.albumName } };
-        }
-      }
-      lastReason = 'no-synced';
-    } else {
-      lastReason = 'get-http-' + res.status;
-    }
-  } catch (err) {
-    lastReason = 'network';
-    console.warn('[YMLP] LRCLIB get failed:', err);
-  }
-
   console.warn('[YMLP] LRCLIB all attempts failed, reason:', lastReason, 'for:', title, artist);
   return { ok: false, reason: lastReason };
+}
+
+function pickLrclibResult(results, duration) {
+  const synced = results.filter((r) => r && r.syncedLyrics);
+  if (!synced.length) return null;
+  if (!(duration > 0)) return synced[0];
+  let best = null;
+  let bestDiff = Infinity;
+  for (let i = 0; i < synced.length; i++) {
+    const d = Number(synced[i].duration) || 0;
+    const diff = d > 0 ? Math.abs(d - duration) : 999;
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = synced[i];
+    }
+  }
+  if (best && bestDiff <= 8) return best;
+  return null;
 }
 
 /* ---------------- LRC 解析（含 enhanced LRC 逐字時間軸） ---------------- */

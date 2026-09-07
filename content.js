@@ -1,6 +1,6 @@
 // ISOLATED world content script：
 // 1. 抓取目前歌曲資訊（曲名/歌手/專輯/時長/影片 ID）
-// 2. 混合策略解析歌詞（LRCLIB 逐字優先、YouTube Music 介面文字降級）
+// 2. 混合策略解析歌詞（LRCLIB 逐行優先、YouTube Music 介面文字降級）
 // 3. 注入頁內「PiP 歌詞」按鈕、輪詢播放進度，經 window.postMessage 推播給 MAIN world
 // 4. 與 MAIN world（pip-opener.js）通訊：資料用 postMessage，狀態用 DOM CustomEvent
 
@@ -21,6 +21,12 @@
   let toastTimer = null;
   let detectTimer = null;
   let progressTimer = null;
+  // 方案 A：切歌後硬鎖進度。必須連續兩次讀到 raw currentTime < START_MAX 才放行。
+  // 單次 t≈0 不解除鎖定（交叉淡入時舊片結尾與空片 0 會交錯，解太早會跳到最後一行）。
+  const START_MAX = 5;
+  const START_HITS = 2;
+  let awaitingTimeReset = false;
+  let startHits = 0;
 
   /* ---------------- 小工具 ---------------- */
 
@@ -60,6 +66,8 @@
         break;
       case 'closed':
         state.pipOpen = false;
+        awaitingTimeReset = false;
+        startHits = 0;
         stopProgress();
         updateState();
         break;
@@ -248,7 +256,16 @@
   function getVideoId() {
     try {
       if (location.pathname === '/watch') {
-        return new URLSearchParams(location.search).get('v') || '';
+        const v = new URLSearchParams(location.search).get('v');
+        if (v) return v;
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      const imgs = document.querySelectorAll('ytmusic-player-bar img, ytmusic-player img');
+      for (const img of imgs) {
+        const src = String((img.currentSrc || img.src || img.getAttribute('src') || ''));
+        const m = src.match(/\/vi\/([a-zA-Z0-9_-]{11})/);
+        if (m) return m[1];
       }
     } catch (e) { /* ignore */ }
     return '';
@@ -258,14 +275,20 @@
     try {
       const vids = Array.from(document.querySelectorAll('video'));
       if (!vids.length) return null;
-      // 切歌時可能同時存在已結束的舊影片與正在播放的新影片。
-      // 優先選擇「正在播放」的影片，避免拿到舊影片的 currentTime，導致進度卡在最底。
+      const isMain = (v) => /html5-main-video|video-stream/.test(String(v.className));
       const playing = vids.filter((v) => v && !v.paused && !v.ended && v.readyState >= 2);
-      if (playing.length) {
-        return playing.find((v) => /html5-main-video|video-stream/.test(String(v.className))) || playing[0];
+      // 交叉淡入淡出時舊歌尾聲與新歌開頭可能同時在播：取 currentTime 較小的（新歌）。
+      if (playing.length > 1) {
+        const sorted = playing.slice().sort((a, b) => (a.currentTime || 0) - (b.currentTime || 0));
+        if ((sorted[sorted.length - 1].currentTime || 0) - (sorted[0].currentTime || 0) > 8) {
+          return sorted[0];
+        }
       }
-      const main = vids.find((v) => /html5-main-video|video-stream/.test(String(v.className)));
-      return main || vids[0];
+      if (playing.length) return playing.find(isMain) || playing[0];
+      // 尚未開始播時，不要回傳已結束的舊影片（其 currentTime 會停在最底）。
+      const alive = vids.filter((v) => v && !v.ended);
+      if (alive.length) return alive.find(isMain) || alive[0];
+      return null;
     } catch (e) {
       return null;
     }
@@ -317,7 +340,8 @@
 
     state.currentSong = { id, title, artist, album, duration, videoId };
     console.log('[YMLP] 偵測到歌曲:', JSON.stringify({ title, artist, album, duration, videoId, via: ms ? 'mediaSession' : 'dom' }));
-    // 切歌時先清掉 PiP 上的舊歌詞與進度，避免進度停在上一首的最後一行
+    // 切歌時先清掉 PiP 上的舊歌詞與進度，避免進度停在上一首的最後一行。
+    // 僅在 PiP 開啟時鎖進度：否則之後再開子母畫面會把進行中的歌誤鎖在 0 秒。
     state.lastError = null;
     state.currentLyrics = {
       songId: id,
@@ -326,7 +350,12 @@
       source: 'none',
       loading: true
     };
-    if (state.pipOpen) pushCurrentLyrics();
+    if (state.pipOpen) {
+      awaitingTimeReset = true;
+      startHits = 0;
+      pushCurrentLyrics();
+      postToMain({ type: 'progress', songId: id, time: 0, locked: true });
+    }
     updateState();
     resolveLyrics();
   }
@@ -357,7 +386,137 @@
   function staticLines(texts, duration) {
     const dur = duration || 0;
     const step = texts.length > 1 && dur > 0 ? dur / texts.length : 3;
-    return texts.map((t, i) => ({ time: +(i * step).toFixed(3), text: t, words: null }));
+    return texts.map((t, i) => ({ time: +(i * step).toFixed(3), text: t }));
+  }
+
+  /* -------- YouTube Music InnerTube 官方歌詞（時間軸對應該支影片） -------- */
+
+  function readYtcfg(key) {
+    try {
+      const re = new RegExp('"' + key + '"\\s*:\\s*"([^"]+)"');
+      const scripts = document.getElementsByTagName('script');
+      for (const s of scripts) {
+        const t = s.textContent || '';
+        if (t.length < 40 || t.length > 800000) continue;
+        const m = t.match(re);
+        if (m) return m[1];
+      }
+    } catch (e) { /* ignore */ }
+    return '';
+  }
+
+  function innertubeContext() {
+    return {
+      client: {
+        clientName: 'WEB_REMIX',
+        clientVersion: readYtcfg('INNERTUBE_CLIENT_VERSION') || '1.20241202.01.00',
+        hl: document.documentElement.lang || 'zh-TW',
+        gl: readYtcfg('GL') || 'TW',
+        visitorData: readYtcfg('VISITOR_DATA') || undefined
+      }
+    };
+  }
+
+  function walkJson(obj, visit, depth) {
+    if (!obj || depth > 14) return;
+    if (Array.isArray(obj)) {
+      for (let i = 0; i < obj.length; i++) walkJson(obj[i], visit, depth + 1);
+      return;
+    }
+    if (typeof obj !== 'object') return;
+    visit(obj);
+    for (const k in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, k)) walkJson(obj[k], visit, depth + 1);
+    }
+  }
+
+  function findLyricsBrowseId(data) {
+    let found = '';
+    walkJson(data, (obj) => {
+      if (found) return;
+      const id = (obj.browseEndpoint && obj.browseEndpoint.browseId) || obj.browseId;
+      if (typeof id === 'string' && id.indexOf('MPLYt') === 0) found = id;
+    }, 0);
+    return found;
+  }
+
+  function findTimedLyrics(data) {
+    let rows = null;
+    walkJson(data, (obj) => {
+      if (rows) return;
+      if (Array.isArray(obj.timedLyricsData) && obj.timedLyricsData.length) rows = obj.timedLyricsData;
+    }, 0);
+    if (!rows) return null;
+    const lines = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] || {};
+      const text = String(row.lyricLine || row.lyric || '').trim();
+      if (!text) continue;
+      const cue = row.cueRange || {};
+      const ms = Number(cue.startTimeMilliseconds || row.startTimeMs || 0);
+      lines.push({ time: isFinite(ms) ? ms / 1000 : 0, text: text });
+    }
+    return lines.length ? lines : null;
+  }
+
+  function runsText(node) {
+    if (!node) return '';
+    if (typeof node === 'string') return node;
+    if (typeof node.text === 'string') return node.text;
+    if (Array.isArray(node.runs)) {
+      return node.runs.map((r) => (r && r.text) || '').join('');
+    }
+    return '';
+  }
+
+  function findPlainLyricTexts(data) {
+    let texts = [];
+    walkJson(data, (obj) => {
+      if (texts.length) return;
+      const shelf = obj.musicDescriptionShelfRenderer;
+      if (!shelf) return;
+      const raw = runsText(shelf.description) || String(shelf.description || '');
+      const lines = String(raw).split(/\n+/).map((x) => x.trim()).filter(Boolean);
+      if (lines.length >= 2) texts = lines;
+    }, 0);
+    return texts;
+  }
+
+  async function innertubePost(path, extra) {
+    const ctx = innertubeContext();
+    const key = readYtcfg('INNERTUBE_API_KEY');
+    let url = 'https://music.youtube.com/youtubei/v1/' + path + '?prettyPrint=false';
+    if (key) url += '&key=' + encodeURIComponent(key);
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-YouTube-Client-Name': '67',
+      'X-YouTube-Client-Version': ctx.client.clientVersion
+    };
+    if (ctx.client.visitorData) headers['X-Goog-Visitor-Id'] = ctx.client.visitorData;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: headers,
+      credentials: 'include',
+      body: JSON.stringify(Object.assign({ context: ctx }, extra)),
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!res.ok) throw new Error('http-' + res.status);
+    return res.json();
+  }
+
+  async function fetchYtMusicLyrics(videoId) {
+    if (!videoId) return null;
+    const next = await innertubePost('next', { videoId: videoId });
+    const timedInNext = findTimedLyrics(next);
+    if (timedInNext) return { timed: true, lines: timedInNext };
+    const browseId = findLyricsBrowseId(next);
+    if (!browseId) return null;
+    const browse = await innertubePost('browse', { browseId: browseId });
+    const timed = findTimedLyrics(browse);
+    if (timed) return { timed: true, lines: timed };
+    const plain = findPlainLyricTexts(browse);
+    if (plain && plain.length) return { timed: false, texts: plain };
+    return null;
   }
 
   let resolveSeq = 0;
@@ -366,33 +525,55 @@
     const song = state.currentSong;
     if (!song) return;
     const seq = ++resolveSeq;
+    const videoId = song.videoId || getVideoId();
 
-    const ytText = scrapeYtMusicLyrics();
-
-    let lr = null;
+    let ytTimed = null;
+    let ytPlain = null;
     try {
-      lr = await chrome.runtime.sendMessage({
-        type: 'fetch-lyrics',
-        meta: { title: song.title, artist: song.artist, album: song.album, duration: song.duration }
-      });
-    } catch (e) { lr = null; }
-
-    // 過期結果丟棄
+      const yt = await fetchYtMusicLyrics(videoId);
+      if (yt && yt.timed && yt.lines && yt.lines.length) ytTimed = yt.lines;
+      else if (yt && yt.texts && yt.texts.length) ytPlain = yt.texts;
+    } catch (e) {
+      console.warn('[YMLP] YouTube Music 官方歌詞失敗:', e);
+    }
     if (seq !== resolveSeq || !state.currentSong || state.currentSong.id !== song.id) return;
 
     let lines = [];
     let source = 'none';
-    if (lr && lr.ok && Array.isArray(lr.lines) && lr.lines.length) {
-      lines = lr.lines;
-      source = 'lrclib';
-      state.lastError = null;
-    } else if (ytText && ytText.length) {
-      lines = staticLines(ytText, song.duration);
+
+    if (ytTimed && ytTimed.length) {
+      lines = ytTimed;
       source = 'youtube-music';
       state.lastError = null;
     } else {
-      state.lastError = (lr && lr.reason) ? lr.reason : 'no-lyrics';
-      console.warn('[YMLP] 找不到歌詞:', JSON.stringify({ title: song.title, artist: song.artist, album: song.album }), '原因:', state.lastError, 'YT介面行數:', ytText.length);
+      let lr = null;
+      try {
+        lr = await chrome.runtime.sendMessage({
+          type: 'fetch-lyrics',
+          meta: { title: song.title, artist: song.artist, album: song.album, duration: song.duration }
+        });
+      } catch (e) { lr = null; }
+      if (seq !== resolveSeq || !state.currentSong || state.currentSong.id !== song.id) return;
+
+      if (lr && lr.ok && Array.isArray(lr.lines) && lr.lines.length) {
+        lines = lr.lines;
+        source = 'lrclib';
+        state.lastError = null;
+      } else if (ytPlain && ytPlain.length) {
+        lines = staticLines(ytPlain, song.duration);
+        source = 'youtube-music';
+        state.lastError = null;
+      } else {
+        const scraped = scrapeYtMusicLyrics();
+        if (scraped && scraped.length) {
+          lines = staticLines(scraped, song.duration);
+          source = 'youtube-music';
+          state.lastError = null;
+        } else {
+          state.lastError = (lr && lr.reason) ? lr.reason : 'no-lyrics';
+          console.warn('[YMLP] 找不到歌詞:', JSON.stringify({ title: song.title, artist: song.artist, album: song.album, videoId: videoId }), '原因:', state.lastError);
+        }
+      }
     }
 
     state.currentLyrics = {
@@ -426,7 +607,8 @@
   function currentTime() {
     const v = getVideo();
     if (v && isFinite(v.currentTime) && v.currentTime >= 0) return v.currentTime;
-    // 找不到 <video> 時，從進度條元素估計
+    // 切歌硬鎖期間：沒讀到影片就當未知，不要用進度條（常停在上一首結尾）或 0（會被誤當成已重設）。
+    if (awaitingTimeReset) return -1;
     try {
       const p = q('#progress-bar');
       const val = p && p.getAttribute('aria-valuenow');
@@ -441,10 +623,25 @@
     stopProgress();
     progressTimer = setInterval(() => {
       if (!state.currentSong) return;
+      const t = currentTime();
+      let send = t;
+      let locked = false;
+      if (awaitingTimeReset) {
+        if (t >= 0 && t < START_MAX) startHits += 1;
+        else startHits = 0;
+        if (startHits >= START_HITS) {
+          awaitingTimeReset = false;
+          send = t;
+        } else {
+          send = 0;
+          locked = true;
+        }
+      }
       postToMain({
         type: 'progress',
         songId: state.currentSong.id,
-        time: currentTime()
+        time: send < 0 ? 0 : send,
+        locked: locked
       });
     }, 250);
   }
