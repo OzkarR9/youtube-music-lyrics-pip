@@ -32,32 +32,29 @@
     ':root{color-scheme:dark;}',
     '*{box-sizing:border-box;}',
     'html,body{margin:0;padding:0;height:100%;background:#0f0f13;color:#fff;font-family:system-ui,-apple-system,"Segoe UI","PingFang TC","Microsoft JhengHei","Noto Sans TC",sans-serif;overflow:hidden;}',
-    '#app{display:flex;flex-direction:column;height:100vh;}',
-    '#topbar{display:flex;align-items:flex-start;gap:8px;padding:12px 14px 6px;}',
-    '#meta{flex:1;min-width:0;}',
-    '#song-title{font-size:1.05rem;font-weight:700;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-    '#song-artist{font-size:.85rem;color:#aaa;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-    '#controls{display:flex;gap:4px;flex:none;}',
-    '#controls button{width:30px;height:30px;border:none;border-radius:8px;background:rgba(255,255,255,.1);color:#ddd;cursor:pointer;font-size:.9rem;line-height:1;}',
-    '#controls button:hover{background:rgba(255,255,255,.2);color:#fff;}',
-    '#source{padding:0 14px 6px;font-size:.75rem;color:#777;}',
-    '#viewport{flex:1;overflow-y:auto;padding:8px 14px 64px;}',
-    '#viewport::-webkit-scrollbar{width:8px;}',
-    '#viewport::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:4px;}',
+    '#app{position:relative;height:100vh;}',
+    // 歌詞捲動區：上下各留 50vh 內距，讓目前行（含首行與末行）都能垂直置中
+    '#viewport{height:100%;overflow-y:auto;padding:50vh 18px;}',
+    '#viewport::-webkit-scrollbar{display:none;}',
     '#lyrics{list-style:none;margin:0;padding:0;}',
-    '.lyric-line{font-size:1.35rem;line-height:1.55;color:rgba(255,255,255,.32);padding:10px 6px;border-radius:10px;transition:color .25s,background-color .25s;}',
+    '.lyric-line{font-size:1.5rem;line-height:1.6;color:rgba(255,255,255,.30);padding:9px 6px;border-radius:10px;text-align:center;transition:color .25s,background-color .25s;}',
     '.lyric-line.active{color:#fff;font-weight:650;}',
     '.lyric-line .word{transition:color .12s linear;}',
     '.lyric-line.active .word.sung{color:#ffd166;}',
     '.lyric-line.active .word.current{color:#fff;text-shadow:0 0 14px rgba(255,209,102,.65);}',
-    '#empty{display:none;text-align:center;color:#888;font-size:1rem;padding:40px 16px;}',
-    '#empty.visible{display:block;}'
+    '#empty{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;color:#888;font-size:1rem;padding:40px 20px;}',
+    '#empty.visible{display:flex;}',
+    // 自動隱藏的控制列：滑鼠移動時淡入、停止後淡出，讓歌詞保持純淨
+    '#overlay{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:10px;padding:10px 14px 20px;background:linear-gradient(to bottom,rgba(10,10,14,.9),rgba(10,10,14,0));opacity:0;transition:opacity .3s ease;pointer-events:none;}',
+    '#overlay.show{opacity:1;pointer-events:auto;}',
+    '#overlay-title{flex:1;min-width:0;font-size:.95rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '#overlay-controls{display:flex;gap:6px;flex:none;}',
+    '#overlay button{width:34px;height:34px;border:none;border-radius:50%;background:rgba(255,255,255,.12);color:#eee;cursor:pointer;font-size:1rem;line-height:1;}',
+    '#overlay button:hover{background:rgba(255,255,255,.24);color:#fff;}'
   ].join('\n');
 
   // UI 不使用 innerHTML 建立，改以 createElement 逐個建立——
   // 因為子母畫面視窗的文件啟用了 Trusted Types，字串指派給 innerHTML 會擲出例外。
-
-  const SOURCE_LABEL = { 'lrclib': 'LRCLIB', 'youtube-music': 'YouTube Music（靜態）', 'none': '無' };
 
   /* ---------------- 與 content.js（ISOLATED）通訊 ---------------- */
 
@@ -147,7 +144,9 @@
 
   function buildPipUi(w) {
     const doc = w.document;
-    doc.title = '歌詞子母畫面';
+    // 盡量精簡標題列。注意：Document PiP 視窗頂部由瀏覽器顯示的「來源網域」
+    // （music.youtube.com）屬於瀏覽器 UI，無法由頁面程式碼移除。
+    doc.title = '';
 
     const style = doc.createElement('style');
     style.textContent = PIP_CSS;
@@ -155,50 +154,54 @@
 
     const app = el(doc, 'div', 'app');
 
-    const topbar = el(doc, 'header', 'topbar');
-    const meta = el(doc, 'div', 'meta');
-    const title = el(doc, 'div', 'song-title', null, '—');
-    const artist = el(doc, 'div', 'song-artist', null, '—');
-    meta.appendChild(title);
-    meta.appendChild(artist);
-
-    const controls = el(doc, 'div', 'controls');
-    const minus = el(doc, 'button', 'font-minus', null, 'A−');
-    minus.title = '縮小字型';
-    const plus = el(doc, 'button', 'font-plus', null, 'A+');
-    plus.title = '放大字型';
-    const close = el(doc, 'button', 'close', null, '✕');
-    close.title = '關閉';
-    controls.appendChild(minus);
-    controls.appendChild(plus);
-    controls.appendChild(close);
-
-    topbar.appendChild(meta);
-    topbar.appendChild(controls);
-
-    const source = el(doc, 'div', 'source', null, '來源：—');
-
     const viewport = el(doc, 'main', 'viewport');
     const list = el(doc, 'ul', 'lyrics');
-    const empty = el(doc, 'div', 'empty', 'visible', '尚未收到歌詞…');
     viewport.appendChild(list);
-    viewport.appendChild(empty);
 
-    app.appendChild(topbar);
-    app.appendChild(source);
+    const empty = el(doc, 'div', 'empty', 'visible', '尚未收到歌詞…');
+
+    // 自動隱藏控制列：只保留字型大小，歌名以極簡方式在懸停時顯示
+    const overlay = el(doc, 'div', 'overlay');
+    const title = el(doc, 'div', 'overlay-title', null, '');
+    const controls = el(doc, 'div', 'overlay-controls');
+    const minus = el(doc, 'button', 'font-minus', null, 'A−');
+    minus.title = '縮小字型（−）';
+    const plus = el(doc, 'button', 'font-plus', null, 'A+');
+    plus.title = '放大字型（+）';
+    controls.appendChild(minus);
+    controls.appendChild(plus);
+    overlay.appendChild(title);
+    overlay.appendChild(controls);
+
     app.appendChild(viewport);
+    app.appendChild(empty);
+    app.appendChild(overlay);
     doc.body.appendChild(app);
 
     pipDoc = doc;
-    pipEls = { title, artist, source, list, empty, close, minus, plus };
+    pipEls = { title, list, empty, minus, plus, overlay };
 
     applyFontSize();
 
-    pipEls.close.addEventListener('click', () => {
-      try { w.close(); } catch (e) { /* ignore */ }
-    });
     pipEls.minus.addEventListener('click', () => setFontSize(fontSize - 2));
     pipEls.plus.addEventListener('click', () => setFontSize(fontSize + 2));
+
+    // 控制列：滑鼠移動時顯示，停止 2.2 秒後自動淡出
+    let hideTimer = null;
+    const poke = () => {
+      overlay.classList.add('show');
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => overlay.classList.remove('show'), 2200);
+    };
+    doc.addEventListener('mousemove', poke, { passive: true });
+    doc.addEventListener('mousedown', poke, true);
+    poke(); // 開啟時先短暫顯示，提示控制列存在
+
+    // 鍵盤快捷鍵：− / + 調整字型（維持最少介面操作）
+    doc.addEventListener('keydown', (e) => {
+      if (e.key === '-' || e.key === '_') { e.preventDefault(); setFontSize(fontSize - 2); }
+      else if (e.key === '=' || e.key === '+') { e.preventDefault(); setFontSize(fontSize + 2); }
+    });
 
     if (lastLyrics) applyLyrics(lastLyrics);
   }
@@ -278,9 +281,7 @@
     const doc = pipDoc;
     if (!doc || !pipEls) return;
 
-    pipEls.title.textContent = (current.meta && current.meta.title) || '—';
-    pipEls.artist.textContent = (current.meta && current.meta.artist) || '';
-    pipEls.source.textContent = '來源：' + (SOURCE_LABEL[current.source] || current.source || '—');
+    pipEls.title.textContent = (current.meta && current.meta.title) || '';
     pipEls.list.replaceChildren();
     lastActive = -1;
 
