@@ -20,10 +20,11 @@
   let pipEls = null;
   const supported = 'documentPictureInPicture' in window;
 
-  let current = { songId: null, lines: [], meta: null, source: null, error: null };
+  let current = { songId: null, lines: [], meta: null, source: null, error: null, loading: false };
   let lastLyrics = null;
   let fontSize = 28;
   let lastActive = -1;
+  let lastTime = 0;
 
   /* ---------------- UI 樣式與結構（寫入子母畫面視窗） ---------------- */
 
@@ -79,8 +80,13 @@
       lastLyrics = d;
       if (pipWindow && !pipWindow.closed) applyLyrics(d);
     } else if (d.type === 'progress') {
-      if (pipWindow && !pipWindow.closed && d.songId === current.songId) {
-        updateProgress(Number(d.time) || 0);
+      if (pipWindow && !pipWindow.closed) {
+        if (d.songId === current.songId) {
+          updateProgress(Number(d.time) || 0);
+        } else {
+          // 歌曲已切換、但新歌詞還沒送達：先清除舊高亮，避免進度停在上一首的最後一行
+          clearActiveHighlight();
+        }
       }
     } else if (d.type === 'settings') {
       fontSize = clamp(Number(d.fontSize) || 28);
@@ -251,6 +257,7 @@
   /* ---------------- 渲染 ---------------- */
 
   function applyLyrics(msg) {
+    const isNewSong = (msg.songId !== current.songId);
     current.songId = msg.songId;
     current.meta = msg.meta || null;
     current.lines = Array.isArray(msg.lines)
@@ -258,6 +265,11 @@
       : [];
     current.source = msg.source || 'none';
     current.error = msg.error || null;
+    current.loading = !!msg.loading;
+    if (isNewSong) {
+      lastTime = 0;
+      lastActive = -1;
+    }
     ensureWords();
     render();
   }
@@ -273,9 +285,11 @@
     lastActive = -1;
 
     if (!current.lines.length) {
-      pipEls.empty.textContent = current.source === 'none'
-        ? ('找不到歌詞' + (current.error ? '（' + current.error + '）' : ''))
-        : '尚未收到歌詞…';
+      pipEls.empty.textContent = current.loading
+        ? '載入歌詞中…'
+        : (current.source === 'none'
+          ? ('找不到歌詞' + (current.error ? '（' + current.error + '）' : ''))
+          : '尚未收到歌詞…');
       pipEls.empty.classList.add('visible');
       return;
     }
@@ -304,11 +318,26 @@
     }
 
     pipEls.list.appendChild(frag);
-    updateProgress(0);
+    updateProgress(lastTime);
+  }
+
+  function clearActiveHighlight() {
+    if (!pipEls) return;
+    const lis = pipEls.list.children;
+    for (let i = 0; i < lis.length; i++) {
+      const li = lis[i];
+      li.classList.remove('active');
+      const words = li.querySelectorAll('.word');
+      for (let j = 0; j < words.length; j++) {
+        words[j].classList.remove('sung', 'current');
+      }
+    }
+    lastActive = -1;
   }
 
   function updateProgress(time) {
     if (!pipEls) return;
+    lastTime = time;
     const lines = current.lines;
     if (!lines.length) return;
 
@@ -317,7 +346,12 @@
       if (lines[i].time <= time + 0.05) activeIdx = i;
       else break;
     }
-    if (activeIdx < 0) return;
+
+    // 進度在第一句之前（前奏）或尚未有可高亮的行：清除舊高亮，避免殘留
+    if (activeIdx < 0) {
+      clearActiveHighlight();
+      return;
+    }
 
     const lis = pipEls.list.children;
     for (let i = 0; i < lis.length; i++) {

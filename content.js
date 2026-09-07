@@ -21,7 +21,6 @@
   let toastTimer = null;
   let detectTimer = null;
   let progressTimer = null;
-  let lyricsTimer = null;
 
   /* ---------------- 小工具 ---------------- */
 
@@ -256,7 +255,20 @@
   }
 
   function getVideo() {
-    return q('video') || q('video.html5-main-video');
+    try {
+      const vids = Array.from(document.querySelectorAll('video'));
+      if (!vids.length) return null;
+      // 切歌時可能同時存在已結束的舊影片與正在播放的新影片。
+      // 優先選擇「正在播放」的影片，避免拿到舊影片的 currentTime，導致進度卡在最底。
+      const playing = vids.filter((v) => v && !v.paused && !v.ended && v.readyState >= 2);
+      if (playing.length) {
+        return playing.find((v) => /html5-main-video|video-stream/.test(String(v.className))) || playing[0];
+      }
+      const main = vids.find((v) => /html5-main-video|video-stream/.test(String(v.className)));
+      return main || vids[0];
+    } catch (e) {
+      return null;
+    }
   }
 
   function getDuration() {
@@ -305,6 +317,16 @@
 
     state.currentSong = { id, title, artist, album, duration, videoId };
     console.log('[YMLP] 偵測到歌曲:', JSON.stringify({ title, artist, album, duration, videoId, via: ms ? 'mediaSession' : 'dom' }));
+    // 切歌時先清掉 PiP 上的舊歌詞與進度，避免進度停在上一首的最後一行
+    state.lastError = null;
+    state.currentLyrics = {
+      songId: id,
+      meta: { title, artist, album, duration },
+      lines: [],
+      source: 'none',
+      loading: true
+    };
+    if (state.pipOpen) pushCurrentLyrics();
     updateState();
     resolveLyrics();
   }
@@ -377,7 +399,8 @@
       songId: song.id,
       meta: { title: song.title, artist: song.artist, album: song.album, duration: song.duration },
       lines,
-      source
+      source,
+      loading: false
     };
 
     console.log('[YMLP] 歌詞解析完成:', source, lines.length + ' 行', state.lastError ? ('原因=' + state.lastError) : '');
@@ -393,7 +416,8 @@
       meta: state.currentLyrics.meta,
       lines: state.currentLyrics.lines,
       source: state.currentLyrics.source,
-      error: state.lastError
+      error: state.lastError,
+      loading: !!state.currentLyrics.loading
     });
   }
 
@@ -423,18 +447,12 @@
         time: currentTime()
       });
     }, 250);
-    // 定期重送歌詞：補救 PiP 剛開啟時的競態
-    lyricsTimer = setInterval(pushCurrentLyrics, 2000);
   }
 
   function stopProgress() {
     if (progressTimer) {
       clearInterval(progressTimer);
       progressTimer = null;
-    }
-    if (lyricsTimer) {
-      clearInterval(lyricsTimer);
-      lyricsTimer = null;
     }
   }
 
